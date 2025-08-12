@@ -1,0 +1,225 @@
+import React, { useEffect, useState } from 'react';
+import { SafeAreaView, View, Text, Button, FlatList, TouchableOpacity, ActivityIndicator, StyleSheet, Alert } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// -------------------------
+// Simple multilingual template
+// Uses Gemini (Generative Language) API to dynamically translate app strings
+// Caches translations in AsyncStorage so each language is requested only once
+// Replace YOUR_API_KEY with your Gemini / Google Generative Language API key
+// -------------------------
+
+const API_KEY = 'YOUR_API_KEY'; // <-- Put your Gemini API key here (do NOT commit to public repo)
+const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+
+// Base English strings (source of truth)
+const BASE_TEXTS = {
+  about_title: 'About Us',
+  about_text: 'Bloombytech Solutions provides innovative IT and agricultural software solutions to help farmers and businesses grow efficiently.',
+  services_title: 'Our Services',
+  services_item_1: 'Crop yield prediction software',
+  services_item_2: 'Mobile agriculture marketplace',
+  services_item_3: 'Data-driven farm management tools',
+  contact_title: 'Contact',
+  contact_text: 'Email: info@bloombytech.example | Phone: +91-XXXXXXXXXX',
+};
+
+const SUPPORTED_LANGUAGES = [
+  { code: 'en', name: 'English' },
+  { code: 'hi', name: 'Hindi' },
+  { code: 'kn', name: 'Kannada' },
+  { code: 'ta', name: 'Tamil' },
+  { code: 'mr', name: 'Marathi' },
+];
+
+export default function App() {
+  const [lang, setLang] = useState('en');
+  const [texts, setTexts] = useState(BASE_TEXTS);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    // attempt to load cached translation on startup
+    (async () => {
+      if (lang === 'en') return; // base
+      const cached = await getCachedTranslation(lang);
+      if (cached) setTexts(cached);
+      else fetchAndCacheTranslation(lang);
+    })();
+  }, [lang]);
+
+  async function getCachedTranslation(targetLang) {
+    try {
+      const raw = await AsyncStorage.getItem(`translation:${targetLang}`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed;
+    } catch (e) {
+      console.warn('Error reading cache', e);
+      return null;
+    }
+  }
+
+  async function saveCachedTranslation(targetLang, data) {
+    try {
+      await AsyncStorage.setItem(`translation:${targetLang}`, JSON.stringify(data));
+    } catch (e) {
+      console.warn('Error saving cache', e);
+    }
+  }
+
+  // Build a prompt that asks Gemini to return a JSON object containing translated keys.
+  // Asking model to return JSON helps parsing reliably.
+  function buildPrompt(sourceTexts, targetLang) {
+    const pairs = Object.entries(sourceTexts)
+      .map(([k, v]) => `${k}: "${v.replace(/\"/g, '\\\"')}"`)
+      .join('\n');
+
+    return (
+      `You are a professional translator. Translate the following key-value lines into ${targetLang}. ` +
+      `Return ONLY a valid JSON object mapping keys to translated strings (no explanation). ` +
+      `Keep sentences short and mobile-friendly.
+
+Keys and English values:\n${pairs}\n\n` +
+      `Example output format: {"about_title":"...","about_text":"..."}`
+    );
+  }
+
+  async function fetchAndCacheTranslation(targetLang) {
+    setLoading(true);
+    try {
+      // Build prompt
+      const prompt = buildPrompt(BASE_TEXTS, targetLang);
+
+      const body = {
+        // Using the structures similar to the earlier examples — adjust per your API contract
+        // If your deployment expects a different JSON shape, modify accordingly
+        "content": [{
+          "type": "text", 
+          "text": prompt
+        }],
+        "temperature": 0.0,
+        "candidate_count": 1
+      };
+
+      const res = await fetch(GEMINI_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`API error ${res.status}: ${txt}`);
+      }
+
+      const data = await res.json();
+
+      // The exact response shape may vary; try to pick a text candidate safely.
+      const candidateText =
+        data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+        data?.candidates?.[0]?.output ||
+        data?.output?.[0]?.content ||
+        null;
+
+      if (!candidateText) throw new Error('No translation returned by API');
+
+      // The model was asked to return pure JSON. Try to extract JSON substring in case it added markup.
+      const jsonMatch = candidateText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('No JSON found in model output');
+
+      const translatedObj = JSON.parse(jsonMatch[0]);
+
+      // Ensure fallback for any missing keys
+      const merged = { ...BASE_TEXTS, ...translatedObj };
+
+      setTexts(merged);
+      await saveCachedTranslation(targetLang, merged);
+    } catch (e) {
+      console.error('Translation fetch failed', e);
+      Alert.alert('Translation error', `Could not translate to ${targetLang}: ${e.message}`);
+      // fallback to English base if error
+      setTexts(BASE_TEXTS);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function changeLanguage(newLang) {
+    setLang(newLang);
+    if (newLang === 'en') {
+      setTexts(BASE_TEXTS);
+      return;
+    }
+    // Attempt cached load first; otherwise the effect will fetch
+    (async () => {
+      const cached = await getCachedTranslation(newLang);
+      if (cached) setTexts(cached);
+      else fetchAndCacheTranslation(newLang);
+    })();
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Multilingual App (Gemini)</Text>
+        <View style={styles.langRow}>
+          {SUPPORTED_LANGUAGES.map((l) => (
+            <TouchableOpacity
+              key={l.code}
+              style={[styles.langBtn, lang === l.code && styles.langBtnActive]}
+              onPress={() => changeLanguage(l.code)}
+            >
+              <Text style={lang === l.code ? styles.langTextActive : styles.langText}>{l.name}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
+      {loading ? (
+        <View style={styles.center}><ActivityIndicator size="large" /></View>
+      ) : (
+        <View style={styles.content}>
+          <Text style={styles.sectionTitle}>{texts.about_title}</Text>
+          <Text style={styles.paragraph}>{texts.about_text}</Text>
+
+          <Text style={styles.sectionTitle}>{texts.services_title}</Text>
+          <Text style={styles.paragraph}>• {texts.services_item_1}</Text>
+          <Text style={styles.paragraph}>• {texts.services_item_2}</Text>
+          <Text style={styles.paragraph}>• {texts.services_item_3}</Text>
+
+          <Text style={styles.sectionTitle}>{texts.contact_title}</Text>
+          <Text style={styles.paragraph}>{texts.contact_text}</Text>
+        </View>
+      )}
+
+      <View style={styles.footer}>
+        <Button title="Clear cached translations" onPress={async () => {
+          try {
+            const keys = (await AsyncStorage.getAllKeys()).filter(k => k.startsWith('translation:'));
+            await AsyncStorage.multiRemove(keys);
+            Alert.alert('Cache cleared');
+          } catch (e) {
+            console.warn(e);
+            Alert.alert('Could not clear cache');
+          }
+        }} />
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#fff' },
+  header: { padding: 16, borderBottomWidth: 1, borderColor: '#eee' },
+  title: { fontSize: 18, fontWeight: '700', marginBottom: 8 },
+  langRow: { flexDirection: 'row', gap: 8 },
+  langBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#ddd', marginRight: 8 },
+  langBtnActive: { backgroundColor: '#e6f4ea', borderColor: '#9ad19e' },
+  langText: { fontSize: 14 },
+  langTextActive: { fontSize: 14, fontWeight: '700' },
+  content: { padding: 16, flex: 1 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', marginTop: 12 },
+  paragraph: { fontSize: 14, marginTop: 6, lineHeight: 20 },
+  footer: { padding: 12, borderTopWidth: 1, borderColor: '#eee' },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+});
